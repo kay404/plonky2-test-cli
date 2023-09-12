@@ -1,0 +1,21 @@
+[package]
+name = "plonky2-test-cli"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+plonky2 = { path = "../plonky2/plonky2" }
+plonky2_ecdsa = {path = "../plonky2-ecdsa"}
+plonky2_keccak256 = {path = "../plonky2-keccak256"}
+plonky2_u32 = {path = "../plonky2-u32"}
+plonky2_field = {path = "../plonky2/field"}
+num = { version = "= 0.4.0", default-features = false }
+
+hex = {version = "0.4.3"}
+log = "0.4.14"
+env_logger = "0.10.0"
+clap = { version = "4.0.29", features = ["derive"] }
+
+sha3 = { version = "0.10.6" }
