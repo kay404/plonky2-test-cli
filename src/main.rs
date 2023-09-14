@@ -4,6 +4,7 @@
 use hex;
 use clap::Parser;
 use num::BigUint;
+use plonky2::hash::hash_types::HashOut;
 use plonky2::iop::witness::PartialWitness;
 use plonky2::plonk::circuit_builder::CircuitBuilder;
 use plonky2::plonk::circuit_data::CircuitConfig;
@@ -12,6 +13,7 @@ use plonky2::plonk::config::{GenericConfig, PoseidonGoldilocksConfig};
 use plonky2::util::timing::TimingTree;
 use log::{info, Level, LevelFilter};
 
+use plonky2_ecdsa::gadgets::biguint::{CircuitBuilderBiguint, BigUintTarget};
 use plonky2_keccak256::keccak256::{CircuitBuilderHashKeccak, WitnessHashKeccak, KECCAK256_R};
 use plonky2_keccak256::CircuitBuilderHash;
 
@@ -25,6 +27,7 @@ use plonky2_ecdsa::curve::curve_types::{CurveScalar, Curve};
 use plonky2_ecdsa::curve::ecdsa::{sign_message, ECDSAPublicKey, ECDSASecretKey, ECDSASignature};
 
 use plonky2::field::types::Field;
+use plonky2_u32::gadgets::arithmetic_u32::CircuitBuilderU32;
 use sha3::{Digest, Keccak256};
 
 #[derive(Parser)]
@@ -35,6 +38,8 @@ struct Cli {
     ecdsa: bool,
     #[arg(short, long, default_value_t = false)]
     all: bool,
+    #[arg(short, long, default_value_t = false)]
+    merge: bool,
     #[arg(short, long)]
     msg: Option<String>,
     #[arg(short, long)]
@@ -57,6 +62,8 @@ fn main() {
         test_ecdsa();
     } else if args.all {
         test_all();
+    } else if args.merge {
+        merge();
     }
 }
 
@@ -235,4 +242,77 @@ fn test_all() {
     let sig = sign_message(msg, sk);
 
     let _ = prove_ecdsa::<F, C, D>(msg, sig, pk);
+}
+
+fn merge() {
+    use plonky2_ecdsa::gadgets::nonnative::{CircuitBuilderNonNative, NonNativeTarget};
+    use plonky2_ecdsa::gadgets::ecdsa::{verify_message_circuit, ECDSAPublicKeyTarget, ECDSASignatureTarget, RegisterNonNativePublicTarget, SetNonNativeTarget};
+    use plonky2_ecdsa::gadgets::curve::{AffinePointTarget, CircuitBuilderCurve};
+    use core::marker::PhantomData;
+
+    const D: usize = 2;
+    type C = PoseidonGoldilocksConfig;
+    type F = <C as GenericConfig<D>>::F;
+    type Curve = Secp256K1; 
+    
+    // msg "Hello omniverse"
+    let msg = "48656c6c6f206f6d6e697665727365";
+    let msg_hash = "ad80a0940685275182f26b9e99270f3792d43fb797781b69db37cea2413f89a4";
+    
+    let config = CircuitConfig::wide_ecc_config();
+    let mut builder = CircuitBuilder::<F, D>::new(config);
+
+    let input = hex::decode(msg).unwrap();
+    let output = hex::decode(msg_hash).unwrap();
+
+    let msg =
+        Secp256K1Scalar::from_noncanonical_biguint(BigUint::from_radix_be(&input, 256).unwrap());
+    let block_size_in_bytes = 136; // in bytes
+    let block_num = input.len() / block_size_in_bytes + 1;
+    let hash_target = builder.add_virtual_hash_input_target(block_num, KECCAK256_R);
+    let hash_output = builder.hash_keccak256(&hash_target);
+    let msg_target: NonNativeTarget<Secp256K1Scalar> = builder.add_virtual_nonnative_target();
+    let pk_target: ECDSAPublicKeyTarget<Secp256K1> = ECDSAPublicKeyTarget(builder.add_virtual_affine_point_target());
+
+    let r_target = builder.add_virtual_nonnative_target();
+    let s_target = builder.add_virtual_nonnative_target();
+    let sig_target = ECDSASignatureTarget::<Curve> {
+        r: r_target,
+        s: s_target,
+    };
+
+    let sk = ECDSASecretKey::<Curve>(Secp256K1Scalar::rand());
+    let pk = ECDSAPublicKey((CurveScalar(sk.0) * Curve::GENERATOR_PROJECTIVE).to_affine());
+
+    let sig = sign_message(msg, sk);
+    pk_target.register_public_input(&mut builder);
+    sig_target.register_public_input(&mut builder);
+
+    verify_message_circuit(&mut builder, msg_target.clone(), sig_target.clone(), pk_target.clone());
+
+    let mut pw = PartialWitness::new();
+    msg_target.set_nonative_target(&mut pw, &msg);
+    pk_target.set_ecdsa_pk_target(&mut pw, &pk);
+    sig_target.set_ecdsa_signature_target(&mut pw, &sig);
+    pw.set_keccak256_input_target(&hash_target, &input);
+    pw.set_keccak256_output_target(&hash_output, &output);
+
+    info!(
+        "Constructing inner proof of `prove_ecdsa` with {} gates",
+        builder.num_gates()
+    );
+
+    let data = builder.build::<C>();
+
+    let timing = TimingTree::new("prove", Level::Info);
+    let proof = data.prove(pw).unwrap();
+    timing.print();
+
+    let timing = TimingTree::new("verify", Level::Info);
+    data.verify(proof.clone()).expect("verify error");
+    timing.print();
+
+    // test_serialization(&proof, &data.verifier_only, &data.common)?;
+    // Ok((proof, data.verifier_only, data.common))
+
 }
