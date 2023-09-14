@@ -303,6 +303,9 @@ fn merge() {
 
     let mut pw = PartialWitness::new();
 
+    //test a wrong pk below
+    // let pk = ECDSAPublicKey((CurveScalar(Secp256K1Scalar::rand()) * Curve::GENERATOR_PROJECTIVE).to_affine());
+
     pk_target.set_ecdsa_pk_target(&mut pw, &pk);
     sig_target.set_ecdsa_signature_target(&mut pw, &sig);
 
