@@ -11,6 +11,6 @@ cargo +nightly run -r -- -e
 ## run keccak
 
 ```sh
-cargo +nightly run --r -- -k
+cargo +nightly run -r -- -k
 # or
 ```

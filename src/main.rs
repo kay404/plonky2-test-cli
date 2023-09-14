@@ -15,7 +15,7 @@ use log::{info, Level, LevelFilter};
 
 use plonky2_ecdsa::gadgets::biguint::{CircuitBuilderBiguint, BigUintTarget};
 use plonky2_keccak256::keccak256::{CircuitBuilderHashKeccak, WitnessHashKeccak, KECCAK256_R};
-use plonky2_keccak256::CircuitBuilderHash;
+use plonky2_keccak256::{CircuitBuilderHash, RegisterHashInputPublicTarget};
 
 use plonky2::field::types::Sample;
 use plonky2::field::secp256k1_scalar::Secp256K1Scalar;
@@ -246,6 +246,7 @@ fn test_all() {
 
 fn merge() {
     use plonky2_ecdsa::gadgets::nonnative::{CircuitBuilderNonNative, NonNativeTarget};
+    use plonky2_ecdsa::gadgets::biguint::WitnessBigUint;
     use plonky2_ecdsa::gadgets::ecdsa::{verify_message_circuit, ECDSAPublicKeyTarget, ECDSASignatureTarget, RegisterNonNativePublicTarget, SetNonNativeTarget};
     use plonky2_ecdsa::gadgets::curve::{AffinePointTarget, CircuitBuilderCurve};
     use core::marker::PhantomData;
@@ -258,6 +259,9 @@ fn merge() {
     // msg "Hello omniverse"
     let msg = "48656c6c6f206f6d6e697665727365";
     let msg_hash = "ad80a0940685275182f26b9e99270f3792d43fb797781b69db37cea2413f89a4";
+
+    // wrong hash below:
+    // let msg_hash = "cc80a0940685275182f26b9e99270f3792d43fb797781b69db37cea2413f89a4";
     
     let config = CircuitConfig::wide_ecc_config();
     let mut builder = CircuitBuilder::<F, D>::new(config);
@@ -265,13 +269,15 @@ fn merge() {
     let input = hex::decode(msg).unwrap();
     let output = hex::decode(msg_hash).unwrap();
 
-    let msg =
-        Secp256K1Scalar::from_noncanonical_biguint(BigUint::from_radix_be(&input, 256).unwrap());
+    // let msg =
+    //     Secp256K1Scalar::from_noncanonical_biguint(BigUint::from_radix_be(&input, 256).unwrap());
+    // let msg = BigUint::from_radix_be(&input, 256).unwrap();
     let block_size_in_bytes = 136; // in bytes
     let block_num = input.len() / block_size_in_bytes + 1;
     let hash_target = builder.add_virtual_hash_input_target(block_num, KECCAK256_R);
     let hash_output = builder.hash_keccak256(&hash_target);
-    let msg_target: NonNativeTarget<Secp256K1Scalar> = builder.add_virtual_nonnative_target();
+    // modify
+    let msg_target: NonNativeTarget<Secp256K1Scalar> = builder.biguint_to_nonnative(&hash_output);
     let pk_target: ECDSAPublicKeyTarget<Secp256K1> = ECDSAPublicKeyTarget(builder.add_virtual_affine_point_target());
 
     let r_target = builder.add_virtual_nonnative_target();
@@ -284,18 +290,24 @@ fn merge() {
     let sk = ECDSASecretKey::<Curve>(Secp256K1Scalar::rand());
     let pk = ECDSAPublicKey((CurveScalar(sk.0) * Curve::GENERATOR_PROJECTIVE).to_affine());
 
-    let sig = sign_message(msg, sk);
+    // modify
+    let msg_hash =
+        Secp256K1Scalar::from_noncanonical_biguint(BigUint::from_radix_le(&output, 256).unwrap());
+    let sig = sign_message(msg_hash, sk);
+
+    hash_target.register_public_target_hash_input(&mut builder);
     pk_target.register_public_input(&mut builder);
     sig_target.register_public_input(&mut builder);
 
     verify_message_circuit(&mut builder, msg_target.clone(), sig_target.clone(), pk_target.clone());
 
     let mut pw = PartialWitness::new();
-    msg_target.set_nonative_target(&mut pw, &msg);
+
     pk_target.set_ecdsa_pk_target(&mut pw, &pk);
     sig_target.set_ecdsa_signature_target(&mut pw, &sig);
+
     pw.set_keccak256_input_target(&hash_target, &input);
-    pw.set_keccak256_output_target(&hash_output, &output);
+    // pw.set_keccak256_output_target(&hash_output, &output);
 
     info!(
         "Constructing inner proof of `prove_ecdsa` with {} gates",
