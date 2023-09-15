@@ -12,5 +12,16 @@ cargo +nightly run -r -- -e
 
 ```sh
 cargo +nightly run -r -- -k
-# or
+```
+
+## run ecdsa with keccak hash message
+
+```sh
+cargo +nightly run -r -- -m
+```
+
+## rum ecdsa
+
+```sh
+cargo +nightly run -r -- --msg MSG_IN_HEX  --pk PUBLIC_KEY_IN_HEX  --sig SIGNATURE_IN_HEX
 ```
