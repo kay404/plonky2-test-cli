@@ -1,33 +1,30 @@
 #![allow(incomplete_features)]
 #![feature(generic_const_exprs)]
 
-use hex;
 use clap::Parser;
+use hex;
 use num::BigUint;
-use plonky2::hash::hash_types::HashOut;
 use plonky2::iop::witness::PartialWitness;
 use plonky2::plonk::circuit_builder::CircuitBuilder;
 use plonky2::plonk::circuit_data::CircuitConfig;
 use plonky2::plonk::config::{GenericConfig, PoseidonGoldilocksConfig};
 // use sha3::{Digest, Keccak256};
-use plonky2::util::timing::TimingTree;
 use log::{info, Level, LevelFilter};
+use plonky2::util::timing::TimingTree;
 
-use plonky2_ecdsa::gadgets::biguint::{CircuitBuilderBiguint, BigUintTarget};
 use plonky2_keccak256::keccak256::{CircuitBuilderHashKeccak, WitnessHashKeccak, KECCAK256_R};
-use plonky2_keccak256::CircuitBuilderHash;
+use plonky2_keccak256::{CircuitBuilderHash, RegisterHashInputPublicTarget};
 
-use plonky2::field::types::Sample;
 use plonky2::field::secp256k1_scalar::Secp256K1Scalar;
+use plonky2::field::types::Sample;
 
-use plonky2_ecdsa::gadgets::recursive_proof::recursive_proof;
-use plonky2_ecdsa::gadgets::ecdsa::prove_ecdsa;
-use plonky2_ecdsa::curve::secp256k1::Secp256K1;
-use plonky2_ecdsa::curve::curve_types::{CurveScalar, Curve};
+use plonky2_ecdsa::curve::curve_types::{Curve, CurveScalar};
 use plonky2_ecdsa::curve::ecdsa::{sign_message, ECDSAPublicKey, ECDSASecretKey, ECDSASignature};
+use plonky2_ecdsa::curve::secp256k1::Secp256K1;
+use plonky2_ecdsa::gadgets::ecdsa::prove_ecdsa;
+use plonky2_ecdsa::gadgets::recursive_proof::recursive_proof;
 
 use plonky2::field::types::Field;
-use plonky2_u32::gadgets::arithmetic_u32::CircuitBuilderU32;
 use sha3::{Digest, Keccak256};
 
 #[derive(Parser)]
@@ -37,14 +34,12 @@ struct Cli {
     #[arg(short, long, default_value_t = false)]
     ecdsa: bool,
     #[arg(short, long, default_value_t = false)]
-    all: bool,
-    #[arg(short, long, default_value_t = false)]
     merge: bool,
-    #[arg(short, long)]
+    #[arg(long)]
     msg: Option<String>,
-    #[arg(short, long)]
+    #[arg(long)]
     pk: Option<String>,
-    #[arg(short, long)]
+    #[arg(long)]
     sig: Option<String>,
 }
 
@@ -60,10 +55,18 @@ fn main() {
         test_keccak();
     } else if args.ecdsa {
         test_ecdsa();
-    } else if args.all {
-        test_all();
     } else if args.merge {
         merge();
+    } else {
+        if args.sig.is_none() || args.pk.is_none() || args.msg.is_none() {
+            println!("The required arguments were not provided: --msg MSG_IN_HEX  --pk PUBLIC_KEY_IN_HEX  --sig SIGNATURE_IN_HEX");
+            return;
+        }
+        test(
+            hex::decode(args.msg.unwrap()).unwrap().as_slice(),
+            hex::decode(args.pk.unwrap()).unwrap().as_slice(),
+            hex::decode(args.sig.unwrap()).unwrap().as_slice(),
+        );
     }
 }
 
@@ -111,7 +114,7 @@ fn test_keccak() {
         let input = hex::decode(t[0]).unwrap();
         let block_size_in_bytes = 136; // in bytes
         let block_num = input.len() / block_size_in_bytes + 1;
-    
+
         let hash_target = builder.add_virtual_hash_input_target(block_num, KECCAK256_R);
         let hash_output = builder.hash_keccak256(&hash_target);
         let num_gates = builder.num_gates();
@@ -122,36 +125,40 @@ fn test_keccak() {
             "keccak256 num_gates={}, copy_constraints={}, quotient_degree_factor={}",
             num_gates, copy_constraints, data.common.quotient_degree_factor
         );
-    
+
         // for t in tests {
         let input = hex::decode(t[0]).unwrap();
         let output = hex::decode(t[1]).unwrap();
-    
+
         // test program
         let mut hasher = Keccak256::new();
         hasher.update(input.as_slice());
         let result = hasher.finalize();
         assert_eq!(result[..], output[..]);
-    
+
         let timing = TimingTree::new("prove keccak", Level::Info);
         // test circuit
         let mut pw = PartialWitness::new();
         pw.set_keccak256_input_target(&hash_target, &input);
         pw.set_keccak256_output_target(&hash_output, &output);
-    
+
         let proof = data.prove(pw).unwrap();
         timing.print();
         assert!(data.verify(proof).is_ok());
     }
 }
 
-fn test_ecdsa(){    
+fn test_ecdsa() {
     const D: usize = 2;
     type C = PoseidonGoldilocksConfig;
     type F = <C as GenericConfig<D>>::F;
     type Curve = Secp256K1;
 
-    fn sample_ecdsa() -> (Secp256K1Scalar, ECDSAPublicKey<Curve>, ECDSASignature<Curve>) {
+    fn sample_ecdsa() -> (
+        Secp256K1Scalar,
+        ECDSAPublicKey<Curve>,
+        ECDSASignature<Curve>,
+    ) {
         let msg = Secp256K1Scalar::rand();
         let sk = ECDSASecretKey::<Curve>(Secp256K1Scalar::rand());
         let pk = ECDSAPublicKey((CurveScalar(sk.0) * Curve::GENERATOR_PROJECTIVE).to_affine());
@@ -179,7 +186,8 @@ fn test_ecdsa(){
 
     // Recursively verify the proof
     let timing = TimingTree::new("Recursively verify the proof", Level::Info);
-    let middle = recursive_proof::<F, C, C, D>(&proofs, &config, None).expect("prove recursive error!");
+    let middle =
+        recursive_proof::<F, C, C, D>(&proofs, &config, None).expect("prove recursive error!");
     let (_, _, cd) = &middle;
     info!(
         "Single recursion proof degree {} = 2^{}",
@@ -191,7 +199,8 @@ fn test_ecdsa(){
     // Add a second layer of recursion to shrink the proof size further
     let timing = TimingTree::new("final prove and verify", Level::Info);
     let final_proof_vec = std::vec![middle];
-    let outer = recursive_proof::<F, C, C, D>(&final_proof_vec, &config, None).expect("prove final error!");
+    let outer =
+        recursive_proof::<F, C, C, D>(&final_proof_vec, &config, None).expect("prove final error!");
     let (_, _, cd) = &outer;
     info!(
         "Double recursion proof degree {} = 2^{}",
@@ -201,7 +210,13 @@ fn test_ecdsa(){
     timing.print();
 }
 
-fn test_all() {
+fn merge() {
+    use plonky2_ecdsa::gadgets::curve::CircuitBuilderCurve;
+    use plonky2_ecdsa::gadgets::ecdsa::{
+        verify_message_circuit, ECDSAPublicKeyTarget, ECDSASignatureTarget,
+    };
+    use plonky2_ecdsa::gadgets::nonnative::{CircuitBuilderNonNative, NonNativeTarget};
+
     const D: usize = 2;
     type C = PoseidonGoldilocksConfig;
     type F = <C as GenericConfig<D>>::F;
@@ -210,69 +225,27 @@ fn test_all() {
     // msg "Hello omniverse"
     let msg = "48656c6c6f206f6d6e697665727365";
     let msg_hash = "ad80a0940685275182f26b9e99270f3792d43fb797781b69db37cea2413f89a4";
-    
-    let config = CircuitConfig::standard_recursion_config();
-    let mut builder = CircuitBuilder::<F, D>::new(config);
 
-    let input = hex::decode(msg).unwrap();
-    let output = hex::decode(msg_hash).unwrap();
+    // wrong hash below:
+    // let msg_hash = "cc80a0940685275182f26b9e99270f3792d43fb797781b69db37cea2413f89a4";
 
-    let msg =
-    Secp256K1Scalar::from_noncanonical_biguint(BigUint::from_radix_be(&input, 256).unwrap());
-    let block_size_in_bytes = 136; // in bytes
-    let block_num = input.len() / block_size_in_bytes + 1;
-    let hash_target = builder.add_virtual_hash_input_target(block_num, KECCAK256_R);
-    let hash_output = builder.hash_keccak256(&hash_target);
-    let data = builder.build::<C>();
-
-    let timing = TimingTree::new("prove keccak", Level::Info);
-    // test circuit
-    let mut pw = PartialWitness::new();
-    pw.set_keccak256_input_target(&hash_target, &input);
-    pw.set_keccak256_output_target(&hash_output, &output);
-
-    let proof = data.prove(pw).unwrap();
-    timing.print();
-    assert!(data.verify(proof).is_ok());
-
-    // let msg = Secp256K1Scalar::rand();
-    let sk = ECDSASecretKey::<Curve>(Secp256K1Scalar::rand());
-    let pk = ECDSAPublicKey((CurveScalar(sk.0) * Curve::GENERATOR_PROJECTIVE).to_affine());
-
-    let sig = sign_message(msg, sk);
-
-    let _ = prove_ecdsa::<F, C, D>(msg, sig, pk);
-}
-
-fn merge() {
-    use plonky2_ecdsa::gadgets::nonnative::{CircuitBuilderNonNative, NonNativeTarget};
-    use plonky2_ecdsa::gadgets::ecdsa::{verify_message_circuit, ECDSAPublicKeyTarget, ECDSASignatureTarget, RegisterNonNativePublicTarget, SetNonNativeTarget};
-    use plonky2_ecdsa::gadgets::curve::{AffinePointTarget, CircuitBuilderCurve};
-    use core::marker::PhantomData;
-
-    const D: usize = 2;
-    type C = PoseidonGoldilocksConfig;
-    type F = <C as GenericConfig<D>>::F;
-    type Curve = Secp256K1; 
-    
-    // msg "Hello omniverse"
-    let msg = "48656c6c6f206f6d6e697665727365";
-    let msg_hash = "ad80a0940685275182f26b9e99270f3792d43fb797781b69db37cea2413f89a4";
-    
     let config = CircuitConfig::wide_ecc_config();
     let mut builder = CircuitBuilder::<F, D>::new(config);
 
     let input = hex::decode(msg).unwrap();
     let output = hex::decode(msg_hash).unwrap();
 
-    let msg =
-        Secp256K1Scalar::from_noncanonical_biguint(BigUint::from_radix_be(&input, 256).unwrap());
+    // let msg =
+    //     Secp256K1Scalar::from_noncanonical_biguint(BigUint::from_radix_be(&input, 256).unwrap());
+    // let msg = BigUint::from_radix_be(&input, 256).unwrap();
     let block_size_in_bytes = 136; // in bytes
     let block_num = input.len() / block_size_in_bytes + 1;
     let hash_target = builder.add_virtual_hash_input_target(block_num, KECCAK256_R);
     let hash_output = builder.hash_keccak256(&hash_target);
-    let msg_target: NonNativeTarget<Secp256K1Scalar> = builder.add_virtual_nonnative_target();
-    let pk_target: ECDSAPublicKeyTarget<Secp256K1> = ECDSAPublicKeyTarget(builder.add_virtual_affine_point_target());
+    // modify
+    let msg_target: NonNativeTarget<Secp256K1Scalar> = builder.biguint_to_nonnative(&hash_output);
+    let pk_target: ECDSAPublicKeyTarget<Secp256K1> =
+        ECDSAPublicKeyTarget(builder.add_virtual_affine_point_target());
 
     let r_target = builder.add_virtual_nonnative_target();
     let s_target = builder.add_virtual_nonnative_target();
@@ -284,18 +257,31 @@ fn merge() {
     let sk = ECDSASecretKey::<Curve>(Secp256K1Scalar::rand());
     let pk = ECDSAPublicKey((CurveScalar(sk.0) * Curve::GENERATOR_PROJECTIVE).to_affine());
 
-    let sig = sign_message(msg, sk);
+    // modify
+    let msg_hash =
+        Secp256K1Scalar::from_noncanonical_biguint(BigUint::from_radix_le(&output, 256).unwrap());
+    let sig = sign_message(msg_hash, sk);
+
+    hash_target.register_public_target_hash_input(&mut builder);
     pk_target.register_public_input(&mut builder);
     sig_target.register_public_input(&mut builder);
 
-    verify_message_circuit(&mut builder, msg_target.clone(), sig_target.clone(), pk_target.clone());
+    verify_message_circuit(
+        &mut builder,
+        msg_target.clone(),
+        sig_target.clone(),
+        pk_target.clone(),
+    );
 
     let mut pw = PartialWitness::new();
-    msg_target.set_nonative_target(&mut pw, &msg);
+
+    //test a wrong pk below
+    // let pk = ECDSAPublicKey((CurveScalar(Secp256K1Scalar::rand()) * Curve::GENERATOR_PROJECTIVE).to_affine());
+
     pk_target.set_ecdsa_pk_target(&mut pw, &pk);
     sig_target.set_ecdsa_signature_target(&mut pw, &sig);
+
     pw.set_keccak256_input_target(&hash_target, &input);
-    pw.set_keccak256_output_target(&hash_output, &output);
 
     info!(
         "Constructing inner proof of `prove_ecdsa` with {} gates",
@@ -311,8 +297,89 @@ fn merge() {
     let timing = TimingTree::new("verify", Level::Info);
     data.verify(proof.clone()).expect("verify error");
     timing.print();
+}
 
-    // test_serialization(&proof, &data.verifier_only, &data.common)?;
-    // Ok((proof, data.verifier_only, data.common))
+fn test(msg: &[u8], pk: &[u8], sig: &[u8]) {
+    use plonky2::field::secp256k1_base::Secp256K1Base;
+    use plonky2_ecdsa::curve::curve_types::AffinePoint;
+    use plonky2_ecdsa::gadgets::curve::CircuitBuilderCurve;
+    use plonky2_ecdsa::gadgets::ecdsa::{
+        verify_message_circuit, ECDSAPublicKeyTarget, ECDSASignatureTarget,
+    };
+    use plonky2_ecdsa::gadgets::nonnative::{CircuitBuilderNonNative, NonNativeTarget};
 
+    const D: usize = 2;
+    type C = PoseidonGoldilocksConfig;
+    type F = <C as GenericConfig<D>>::F;
+    type Curve = Secp256K1;
+
+    let x_biguint = BigUint::from_bytes_be(&pk[0..32]);
+    let y_biguint = BigUint::from_bytes_be(&pk[32..]);
+    let point = AffinePoint::nonzero(
+        Secp256K1Base::from_noncanonical_biguint(x_biguint),
+        Secp256K1Base::from_noncanonical_biguint(y_biguint),
+    );
+    assert!(point.is_valid());
+    let pk = ECDSAPublicKey(point);
+
+    let r = Secp256K1Scalar::from_noncanonical_biguint(
+        BigUint::from_radix_be(&sig[0..32], 256).unwrap(),
+    );
+    let s = Secp256K1Scalar::from_noncanonical_biguint(
+        BigUint::from_radix_be(&sig[32..64], 256).unwrap(),
+    );
+
+    let sig = ECDSASignature { r, s };
+
+    let config = CircuitConfig::wide_ecc_config();
+    let mut builder = CircuitBuilder::<F, D>::new(config);
+
+    // let input = hex::decode(msg).unwrap();
+    // let output = hex::decode(msg_hash).unwrap();
+
+    let block_size_in_bytes = 136; // in bytes
+    let block_num = msg.len() / block_size_in_bytes + 1;
+    let hash_target = builder.add_virtual_hash_input_target(block_num, KECCAK256_R);
+    let hash_output = builder.hash_keccak256(&hash_target);
+
+    let msg_target: NonNativeTarget<Secp256K1Scalar> = builder.biguint_to_nonnative(&hash_output);
+    let pk_target: ECDSAPublicKeyTarget<Secp256K1> =
+        ECDSAPublicKeyTarget(builder.add_virtual_affine_point_target());
+
+    let r_target = builder.add_virtual_nonnative_target();
+    let s_target = builder.add_virtual_nonnative_target();
+    let sig_target = ECDSASignatureTarget::<Curve> {
+        r: r_target,
+        s: s_target,
+    };
+    hash_target.register_public_target_hash_input(&mut builder);
+    pk_target.register_public_input(&mut builder);
+    sig_target.register_public_input(&mut builder);
+
+    verify_message_circuit(
+        &mut builder,
+        msg_target.clone(),
+        sig_target.clone(),
+        pk_target.clone(),
+    );
+
+    let mut pw = PartialWitness::new();
+    pk_target.set_ecdsa_pk_target(&mut pw, &pk);
+    sig_target.set_ecdsa_signature_target(&mut pw, &sig);
+    pw.set_keccak256_input_target(&hash_target, &msg);
+
+    info!(
+        "Constructing inner proof of `prove_ecdsa` with {} gates",
+        builder.num_gates()
+    );
+
+    let data = builder.build::<C>();
+
+    let timing = TimingTree::new("prove", Level::Info);
+    let proof = data.prove(pw).unwrap();
+    timing.print();
+
+    let timing = TimingTree::new("verify", Level::Info);
+    data.verify(proof.clone()).expect("verify error");
+    timing.print();
 }
