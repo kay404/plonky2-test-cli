@@ -12,6 +12,7 @@ use plonky2::plonk::config::{GenericConfig, PoseidonGoldilocksConfig};
 use log::{info, Level, LevelFilter};
 use plonky2::util::timing::TimingTree;
 
+use plonky2_ecdsa::gadgets::biguint::WitnessBigUint;
 use plonky2_keccak256::keccak256::{CircuitBuilderHashKeccak, WitnessHashKeccak, KECCAK256_R};
 use plonky2_keccak256::{CircuitBuilderHash, RegisterHashInputPublicTarget};
 
@@ -141,6 +142,8 @@ fn test_keccak() {
         let mut pw = PartialWitness::new();
         pw.set_keccak256_input_target(&hash_target, &input);
         pw.set_keccak256_output_target(&hash_output, &output);
+        let result = pw.get_biguint_target(hash_output);
+        println!("{:?}", result.to_bytes_be());
 
         let proof = data.prove(pw).unwrap();
         timing.print();
@@ -307,6 +310,7 @@ fn test(msg: &[u8], pk: &[u8], sig: &[u8]) {
         verify_message_circuit, ECDSAPublicKeyTarget, ECDSASignatureTarget,
     };
     use plonky2_ecdsa::gadgets::nonnative::{CircuitBuilderNonNative, NonNativeTarget};
+    use plonky2_test_cli::target_convert::biguint_target_to_le;
 
     const D: usize = 2;
     type C = PoseidonGoldilocksConfig;
@@ -341,8 +345,10 @@ fn test(msg: &[u8], pk: &[u8], sig: &[u8]) {
     let block_num = msg.len() / block_size_in_bytes + 1;
     let hash_target = builder.add_virtual_hash_input_target(block_num, KECCAK256_R);
     let hash_output = builder.hash_keccak256(&hash_target);
+    let hash_output_le = biguint_target_to_le(&mut builder, hash_output);
 
-    let msg_target: NonNativeTarget<Secp256K1Scalar> = builder.biguint_to_nonnative(&hash_output);
+    let msg_target: NonNativeTarget<Secp256K1Scalar> =
+        builder.biguint_to_nonnative(&hash_output_le);
     let pk_target: ECDSAPublicKeyTarget<Secp256K1> =
         ECDSAPublicKeyTarget(builder.add_virtual_affine_point_target());
 
